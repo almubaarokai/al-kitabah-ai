@@ -1,0 +1,377 @@
+import os
+import logging
+from flask import Flask, request, jsonify, session, redirect, url_for, render_template_string
+import google.generativeai as genai
+
+# ==========================================
+# 1. CONFIGURATION & LOGGING SETUP
+# ==========================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+# Menggunakan secret key acak untuk keamanan enkripsi session data
+app.secret_key = os.urandom(24).hex()
+
+SYSTEM_PROMPT = (
+    "Kamu adalah guru Bahasa Arab profesional khusus Maharah Kitabah untuk siswa kelas 10 "
+    "Madrasah Aliyah. Tugasmu membantu siswa belajar menulis Bahasa Arab dengan baik dan benar. "
+    "Setiap kesalahan harus diperbaiki dengan penjelasan sederhana dalam Bahasa Indonesia. "
+    "Berikan contoh kalimat yang benar dan latihan lanjutan secara bertahap. "
+    "Gunakan gaya mengajar yang ramah, memotivasi, dan mudah dipahami."
+)
+
+# ==========================================
+# 2. AI INTERACTION SERVICE
+# ==========================================
+class AIService:
+    @staticmethod
+    def generate_response(api_key: str, chat_history: list, user_message: str) -> dict:
+        try:
+            # Konfigurasi API secara dinamis per request (Keamanan Terjaga)
+            genai.configure(api_key=api_key)
+            
+            model = genai.GenerativeModel(
+                model_name='gemini-1.5-flash',
+                system_instruction=SYSTEM_PROMPT
+            )
+            
+            # Konversi format history dari Flask session ke format Gemini
+            formatted_history = []
+            for msg in chat_history:
+                role = "user" if msg["role"] == "user" else "model"
+                formatted_history.append({"role": role, "parts": [msg["content"]]})
+            
+            chat = model.start_chat(history=formatted_history)
+            response = chat.send_message(user_message)
+            
+            return {"success": True, "reply": response.text}
+            
+        except genai.types.generation_types.BlockedPromptException:
+            return {"success": False, "error": "Pesan Anda mengandung konten yang tidak diizinkan oleh sistem keamanan."}
+        except Exception as e:
+            logger.error(f"Error pada AI Service: {str(e)}")
+            return {"success": False, "error": "Gagal terhubung ke AI. Pastikan API Key Anda valid dan internet stabil."}
+
+# ==========================================
+# 3. ROUTING & CONTROLLERS
+# ==========================================
+@app.route('/')
+def index():
+    if 'username' in session and 'api_key' in session:
+        return redirect(url_for('dashboard'))
+    return redirect(url_for('login'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = None
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        api_key = request.form.get('api_key', '').strip()
+        
+        if not username or not api_key:
+            error = "Username dan API Key tidak boleh kosong!"
+        else:
+            session['username'] = username
+            session['api_key'] = api_key
+            session['chat_history'] = [
+                {
+                    "role": "assistant", 
+                    "content": f"Ahlan wa sahlan, {username}! 👋 Selamat datang di kelas Maharah Kitabah. Saya siap membimbingmu menulis bahasa Arab dengan benar. Silakan klik menu latihan di samping atau langsung ketik kalimat Arabmu di bawah!"
+                }
+            ]
+            return redirect(url_for('dashboard'))
+        
+    return render_template_string(LOGIN_TEMPLATE, error=error)
+
+@app.route('/dashboard')
+def dashboard():
+    if 'username' not in session or 'api_key' not in session:
+        return redirect(url_for('login'))
+    return render_template_string(DASHBOARD_TEMPLATE, username=session['username'], chat_history=session['chat_history'])
+
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    if 'api_key' not in session:
+        return jsonify({"success": False, "error": "Sesi Anda telah berakhir. Silakan login kembali."}), 401
+        
+    data = request.get_json() or {}
+    user_message = data.get('message', '').strip()
+    
+    if not user_message:
+        return jsonify({"success": False, "error": "Pesan tidak boleh kosong."}), 400
+        
+    history = session.get('chat_history', [])
+    
+    ai_response = AIService.generate_response(session['api_key'], history, user_message)
+    
+    if ai_response['success']:
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": ai_response['reply']})
+        session['chat_history'] = history
+        session.modified = True
+        return jsonify({"success": True, "reply": ai_response['reply']})
+    else:
+        return jsonify({"success": False, "error": ai_response['error']}), 500
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+# ==========================================
+# 4. FRONTEND UI TEMPLATES (HTML, CSS, JS)
+# ==========================================
+
+BASE_HEAD = """
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Al-Kitabah AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        emerald: { 600: '#059669', 700: '#047857', 800: '#065f46' },
+                        navy: { 800: '#1e293b', 900: '#0f172a' }
+                    }
+                }
+            }
+        }
+    </script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Amiri:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 20px; }
+        .arabic-text { font-family: 'Amiri', serif; direction: rtl; }
+        .glass-panel { background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+    </style>
+</head>
+"""
+
+LOGIN_TEMPLATE = f"""
+<!DOCTYPE html>
+<html lang="id" class="h-full bg-slate-50">
+{BASE_HEAD}
+<body class="h-full font-['Plus_Jakarta_Sans'] text-slate-800 antialiased flex items-center justify-center bg-gradient-to-tr from-navy-900 via-emerald-800 to-navy-900 px-4">
+    <div class="max-w-md w-full glass-panel p-8 rounded-3xl shadow-2xl border border-white/20">
+        <div class="text-center mb-8">
+            <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-emerald-600 text-white shadow-lg text-3xl font-bold mb-3">ع</div>
+            <h2 class="text-2xl font-bold text-slate-900">Al-Kitabah <span class="text-emerald-700">AI</span></h2>
+            <p class="text-sm text-slate-500 mt-1">Pembelajaran Maharah Kitabah Kelas 10 MA</p>
+        </div>
+
+        {"{% if error %}"}
+        <div class="mb-4 p-4 bg-red-50 border-l-4 border-red-500 rounded-r-xl text-sm text-red-700">
+            <span>⚠️ {"{{ error }}"}</span>
+        </div>
+        {"{% endif %}"}
+
+        <form action="/login" method="POST" class="space-y-5">
+            <div>
+                <label class="block text-sm font-semibold text-slate-700 mb-2">Username Sesi</label>
+                <input type="text" name="username" placeholder="Masukkan nama Anda..." required
+                    class="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white/70 focus:outline-none focus:ring-2 focus:ring-emerald-600 text-sm">
+            </div>
+            <div>
+                <label class="block text-sm font-semibold text-slate-700 mb-2">B.AI / Gemini API Key</label>
+                <div class="relative">
+                    <input type="password" id="api_key_input" name="api_key" placeholder="AIzaSy..." required
+                        class="w-full px-4 py-3 rounded-xl border border-slate-200 bg-white/70 focus:outline-none focus:ring-2 focus:ring-emerald-600 text-sm pr-12">
+                    <button type="button" onclick="togglePasswordVisibility()" class="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-400 hover:text-slate-600 text-xs font-semibold select-none">
+                        <span id="eye_icon">SHOW</span>
+                    </button>
+                </div>
+            </div>
+            <button type="submit" class="w-full py-3.5 bg-gradient-to-r from-emerald-600 to-emerald-700 text-white font-semibold rounded-xl shadow-lg hover:from-emerald-700 hover:to-emerald-800 transition-all">
+                Mulai Belajar 🚀
+            </button>
+        </form>
+    </div>
+    <script>
+        function togglePasswordVisibility() {
+            const input = document.getElementById('api_key_input');
+            const icon = document.getElementById('eye_icon');
+            if (input.type === 'password') {{ input.type = 'text'; icon.innerText = 'HIDE'; }}
+            else {{ input.type = 'password'; icon.innerText = 'SHOW'; }}
+        }}
+    </script>
+</body>
+</html>
+"""
+
+DASHBOARD_TEMPLATE = f"""
+<!DOCTYPE html>
+<html lang="id" class="h-full bg-slate-50">
+{BASE_HEAD}
+<body class="h-full font-['Plus_Jakarta_Sans'] text-slate-800 antialiased flex flex-col">
+    <header class="bg-white border-b border-slate-100 px-6 py-4 flex items-center justify-between shadow-sm sticky top-0 z-50">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center font-bold text-white text-lg shadow-md">ع</div>
+            <div>
+                <h1 class="text-md font-bold text-slate-900">Al-Kitabah AI</h1>
+                <p class="text-xs text-emerald-600 font-medium">Tutor Maharah Kitabah Kelas X</p>
+            </div>
+        </div>
+        <div class="flex items-center gap-4">
+            <div class="hidden sm:flex flex-col text-right">
+                <span class="text-xs text-slate-400">Siswa Aktif</span>
+                <span class="text-sm font-semibold text-slate-700">👤 {"{{ username }}"}</span>
+            </div>
+            <a href="/logout" class="px-3 py-2 bg-rose-50 text-rose-600 hover:bg-rose-100 font-medium text-xs rounded-xl transition-all">Keluar Sesi</a>
+        </div>
+    </header>
+
+    <div class="flex-1 flex flex-col md:flex-row overflow-hidden">
+        <aside class="w-full md:w-80 bg-white border-r border-slate-100 flex flex-col p-4 gap-2 overflow-y-auto">
+            <div class="text-xs font-bold text-slate-400 px-2 py-1 uppercase tracking-wider mb-2">Menu Pembelajaran</div>
+            <button onclick="triggerMenu('📝 Latihan Menulis', 'Berikan saya satu tugas latihan menulis (Maharah Kitabah) yang sesuai untuk tingkat kelas 10 MA.')" class="w-full flex flex-col items-start p-3 text-left rounded-2xl hover:bg-slate-50 transition-all group">
+                <span class="text-sm font-bold text-slate-800 group-hover:text-emerald-700">📝 Latihan Menulis</span>
+                <span class="text-xs text-slate-400 mt-0.5">Dapatkan tugas menulis kalimat tematis dari AI.</span>
+            </button>
+            <button onclick="triggerMenu('🔍 Koreksi Otomatis', 'Saya ingin menguji kalimat saya. Tolong koreksi struktur kalimat arab berikut jika ada kesalahan: [Tulis Kalimat Anda Di Sini]')" class="w-full flex flex-col items-start p-3 text-left rounded-2xl hover:bg-slate-50 transition-all group">
+                <span class="text-sm font-bold text-slate-800 group-hover:text-emerald-700">🔍 Koreksi Otomatis</span>
+                <span class="text-xs text-slate-400 mt-0.5">Analisis kesalahan tata bahasa (Nahwu/Sharaf).</span>
+            </button>
+            <button onclick="triggerMenu('💬 Percakapan Arab', 'Mari kita mulai simulasi percakapan bahasa Arab pendek untuk kelas 10 MA dengan tema: Di Sekolah (Fil Madrosah). Mulailah percakapan dengan menyapa saya!')" class="w-full flex flex-col items-start p-3 text-left rounded-2xl hover:bg-slate-50 transition-all group">
+                <span class="text-sm font-bold text-slate-800 group-hover:text-emerald-700">💬 Percakapan Arab</span>
+                <span class="text-xs text-slate-400 mt-0.5">Simulasi dialog interaktif di berbagai situasi.</span>
+            </button>
+            <button onclick="triggerMenu('📚 Kosakata Harian', 'Berikan saya 10 kosakata baru (Mufrodat) harian pilihan lengkap beserta arti dan contoh kalimat aplikatifnya.')" class="w-full flex flex-col items-start p-3 text-left rounded-2xl hover:bg-slate-50 transition-all group">
+                <span class="text-sm font-bold text-slate-800 group-hover:text-emerald-700">📚 Kosakata Harian</span>
+                <span class="text-xs text-slate-400 mt-0.5">Perkaya hafalan mufrodat kontekstual baru.</span>
+            </button>
+            <button onclick="triggerMenu('🏆 Penilaian Kitabah', 'Tolong berikan penilaian tulisan saya sebelumnya berupa skor angka dari aspek Tata Bahasa, Kosakata, Struktur Kalimat, dan Kerapihan Penulisan skala 0-100.')" class="w-full flex flex-col items-start p-3 text-left rounded-2xl hover:bg-slate-50 transition-all group">
+                <span class="text-sm font-bold text-slate-800 group-hover:text-emerald-700">🏆 Penilaian Kitabah</span>
+                <span class="text-xs text-slate-400 mt-0.5">Evaluasi skor kemampuan berdasarkan parameter.</span>
+            </button>
+        </aside>
+
+        <main class="flex-1 flex flex-col bg-slate-50 justify-between relative overflow-hidden">
+            <div id="error-toast" class="hidden absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-red-600 text-white text-xs font-semibold px-4 py-2.5 rounded-full shadow-lg"></div>
+
+            <div id="chat-window" class="flex-1 p-4 md:p-6 overflow-y-auto space-y-4 custom-scrollbar">
+                {"{% for chat in chat_history %}"}
+                    {"{% if chat.role == 'user' %}"}
+                    <div class="flex justify-end">
+                        <div class="max-w-[85%] bg-emerald-600 text-white rounded-2xl rounded-tr-none px-4 py-3 shadow-md">
+                            <p class="text-sm leading-relaxed whitespace-pre-wrap arabic-text text-right">{"{{ chat.content }}"}</p>
+                        </div>
+                    </div>
+                    {"{% else %}"}
+                    <div class="flex justify-start">
+                        <div class="max-w-[85%] bg-white border border-slate-100 text-slate-800 rounded-2xl rounded-tl-none px-4 py-3 shadow-sm">
+                            <p class="text-sm leading-relaxed whitespace-pre-wrap">{"{{ chat.content }}"}</p>
+                            <button onclick="copyText(this)" class="mt-2 text-[10px] uppercase font-bold tracking-wider text-slate-400 hover:text-emerald-600 transition-all">📋 Salin Jawaban</button>
+                        </div>
+                    </div>
+                    {"{% endif %}"}
+                {"{% endfor %}"}
+                
+                <div id="loading-indicator" class="hidden flex justify-start items-center gap-2">
+                    <div class="bg-white border border-slate-100 rounded-2xl px-4 py-3 shadow-sm flex items-center gap-2 text-xs text-slate-400 font-medium">
+                        <div class="w-2 h-2 rounded-full bg-emerald-600 animate-bounce"></div>
+                        <div class="w-2 h-2 rounded-full bg-emerald-600 animate-bounce [animation-delay:0.2s]"></div>
+                        <div class="w-2 h-2 rounded-full bg-emerald-600 animate-bounce [animation-delay:0.4s]"></div>
+                        <span>Ustadz AI sedang memeriksa...</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="p-4 bg-white border-t border-slate-100 flex flex-col gap-3">
+                <div class="flex gap-2">
+                    <textarea id="chat-input" rows="2" placeholder="Tulis kalimat Bahasa Arab yang ingin dipelajari..." 
+                        class="flex-1 p-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-emerald-600 text-sm resize-none custom-scrollbar arabic-text text-right"></textarea>
+                    <div class="flex flex-col gap-1 justify-center">
+                        <button id="send-btn" onclick="sendMessage()" class="px-5 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm rounded-xl shadow-md transition-all">Kirim</button>
+                        <button onclick="clearChatArea()" class="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-500 font-medium text-[11px] rounded-lg transition-all">Bersihkan</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const chatWindow = document.getElementById('chat-window');
+        function scrollToBottom() {{ chatWindow.scrollTop = chatWindow.scrollHeight; }}
+        window.onload = scrollToBottom;
+
+        function triggerMenu(title, promptText) {{
+            const inputField = document.getElementById('chat-input');
+            inputField.value = promptText;
+            inputField.focus();
+        }}
+
+        function copyText(button) {{
+            const text = button.parentNode.firstChild.textContent.trim();
+            navigator.clipboard.writeText(text).then(() => {{
+                const orig = button.innerText; button.innerText = "✅ Tersalin!";
+                setTimeout(() => {{ button.innerText = orig; }}, 1500);
+            }});
+        }}
+
+        function clearChatArea() {{
+            if(confirm("Apakah Anda ingin memuat ulang dan membersihkan layar chat ini?")) {{ window.location.reload(); }}
+        }}
+
+        function showErrorToast(msg) {{
+            const toast = document.getElementById('error-toast');
+            toast.innerText = msg; toast.classList.remove('hidden');
+            setTimeout(() => {{ toast.classList.add('hidden'); }}, 4000);
+        }}
+
+        async function sendMessage() {{
+            const inputField = document.getElementById('chat-input');
+            const sendBtn = document.getElementById('send-btn');
+            const loading = document.getElementById('loading-indicator');
+            const msg = inputField.value.trim();
+            if (!msg) return;
+
+            const userBubble = `<div class="flex justify-end"><div class="max-w-[85%] bg-emerald-600 text-white rounded-2xl rounded-tr-none px-4 py-3 shadow-md"><p class="text-sm leading-relaxed whitespace-pre-wrap arabic-text text-right">\${escapeHTML(msg)}</p></div></div>`;
+            loading.insertAdjacentHTML('beforebegin', userBubble);
+            inputField.value = '';
+            
+            loading.classList.remove('hidden');
+            sendBtn.disabled = true; sendBtn.classList.add('opacity-50');
+            scrollToBottom();
+
+            try {{
+                const r = await fetch('/api/chat', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ message: msg }})
+                }});
+                const d = await r.json();
+                if (d.success) {{
+                    const aiBubble = `<div class="flex justify-start"><div class="max-w-[85%] bg-white border border-slate-100 text-slate-800 rounded-2xl rounded-tl-none px-4 py-3 shadow-sm"><p class="text-sm leading-relaxed whitespace-pre-wrap">\${escapeHTML(d.reply)}</p><button onclick="copyText(this)" class="mt-2 text-[10px] uppercase font-bold tracking-wider text-slate-400 hover:text-emerald-600 transition-all">📋 Salin Jawaban</button></div></div>`;
+                    loading.insertAdjacentHTML('beforebegin', aiBubble);
+                }} else {{
+                    showErrorToast(d.error || "Terjadi kesalahan.");
+                }}
+            }} catch {{
+                showErrorToast("Koneksi bermasalah. Pastikan server tetap berjalan.");
+            }} finally {{
+                loading.classList.add('hidden');
+                sendBtn.disabled = false; sendBtn.classList.remove('opacity-50');
+                scrollToBottom();
+            }}
+        }}
+
+        function escapeHTML(str) {{
+            return str.replace(/[&<>'"]/g, t => ({{ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }}[t] || t));
+        }}
+
+        document.getElementById('chat-input').addEventListener('keydown', function(e) {{
+            if (e.key === 'Enter' && !e.shiftKey) {{ e.preventDefault(); sendMessage(); }}
+        }});
+    </script>
+</body>
+</html>
+"""
+
+if __name__ == '__main__':
+    # Berjalan lokal pada mode debug otomatis
+    app.run(debug=True, host='0.0.0.0', port=5000)
